@@ -1,0 +1,10 @@
+# script used to reconstruct git history
+rebuild-history.sh
+
+# editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
