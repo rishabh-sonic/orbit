@@ -1,6 +1,6 @@
 # Orbit
 
-A full-stack forum — Go 1.25 REST API + WebSocket service + Vue 3 frontend.
+A full-stack community discussion platform — Go REST API + WebSocket service + Vue 3 SPA.
 
 ```
 orbit/
@@ -10,52 +10,50 @@ orbit/
 
 ---
 
-## Option A — Full Docker Compose (recommended for first run)
+## Option A — Full Docker Compose (recommended)
 
-Builds and starts every service in containers.
+Builds and starts every service in one command.
 
 ```bash
-# From the project root:
 docker compose up --build
 ```
 
 | Service | URL |
 |---|---|
-| Frontend (nginx SPA) | http://localhost:3000 |
-| API (direct access) | http://localhost:8080 |
+| Frontend | http://localhost:3000 |
+| API (direct) | http://localhost:8080 |
 | WebSocket | ws://localhost:8082 |
-| RabbitMQ management | http://localhost:15672 (guest / guest) |
-| MinIO console | http://localhost:9001 (minioadmin / minioadmin) |
+| RabbitMQ console | http://localhost:15672 — `guest` / `guest` |
+| MinIO console | http://localhost:9001 — `minioadmin` / `minioadmin` |
 
-The first run automatically:
-1. Starts Postgres, Redis, RabbitMQ, OpenSearch, MinIO
+On first run this automatically:
+1. Starts Postgres, Redis, RabbitMQ, OpenSearch and MinIO
 2. Creates the MinIO `orbit` bucket
-3. Runs DB migrations via `golang-migrate`
-4. Builds and starts the Go API + WS services
-5. Builds the Vue app and serves it via nginx
+3. Runs database migrations via `golang-migrate`
+4. Builds and starts the Go API + WebSocket services
+5. Builds the Vue app and serves it through nginx
 
-To stop everything:
 ```bash
-docker compose down          # keep volumes (data persisted)
-docker compose down -v       # also wipe all data volumes
+docker compose down      # stop, keep data volumes
+docker compose down -v   # stop and wipe all data
 ```
 
 ---
 
-## Option B — Infrastructure in Docker, services on host
+## Option B — Infrastructure in Docker, code on host
 
-Faster iteration: infra runs in containers, Go and frontend run directly on your machine.
+Better for active development — infra in containers, Go and frontend run locally.
 
 ### 1. Start infrastructure
 
 ```bash
 cd backend
-make up        # docker compose up -d (postgres, redis, rabbitmq, opensearch, minio)
-sleep 5
+make up        # starts postgres, redis, rabbitmq, opensearch, minio
 make migrate   # requires: brew install golang-migrate
 ```
 
-Create the MinIO bucket (one time):
+Create the MinIO bucket (one-time):
+
 ```bash
 docker run --rm --network host minio/mc \
   sh -c "mc alias set local http://localhost:9000 minioadmin minioadmin && \
@@ -66,59 +64,63 @@ docker run --rm --network host minio/mc \
 ### 2. Configure environment
 
 ```bash
-cd backend
-cp ../.env.example .env     # edit JWT_SECRET etc. if desired
+cp .env.example backend/.env
+# edit backend/.env if you want to enable optional features (see below)
 ```
 
-### 3. Run API + WebSocket servers
+### 3. Run the backend
 
 ```bash
 cd backend
-make api   # → http://localhost:8080
-# in another terminal:
-make ws    # → ws://localhost:8082
+make api   # API server  → http://localhost:8080
+
+# in a second terminal:
+make ws    # WebSocket   → ws://localhost:8082
 
 # or both at once:
 make dev
 ```
 
-### 4. Run the frontend dev server
+### 4. Run the frontend
 
 ```bash
 cd frontend
 npm install
-npm run dev    # → http://localhost:3000  (proxies /api → localhost:8080)
+npm run dev   # → http://localhost:3000  (proxies /api and /oauth to localhost:8080)
 ```
 
 ---
 
 ## Configuration
 
-Copy `.env.example` to `backend/.env` and fill in any real keys you need:
+All options have sensible defaults for local development. The table below lists the variables needed to enable optional features — copy `.env.example` to `backend/.env` and fill in only what you need.
 
-| Feature | Variables needed |
+| Feature | Environment variables |
 |---|---|
-| Email verification | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` |
-| Web Push | `WEBPUSH_PUBLIC_KEY`, `WEBPUSH_PRIVATE_KEY` |
 | Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
 | GitHub OAuth | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
-| Discord OAuth | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` |
-| Twitter OAuth | `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET` |
-| Telegram OAuth | `TELEGRAM_BOT_TOKEN` |
+| Transactional email | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` |
+| Web push notifications | `WEBPUSH_PUBLIC_KEY`, `WEBPUSH_PRIVATE_KEY` |
 
-Everything else has working defaults for local development.
+Generate VAPID keys for web push:
 
-To generate VAPID keys for Web Push:
 ```bash
 npx web-push generate-vapid-keys
 ```
 
+Register OAuth redirect URIs in each provider's developer console:
+
+| Provider | Redirect URI |
+|---|---|
+| Google | `http://localhost:3000/auth/google` |
+| GitHub | `http://localhost:3000/auth/github` |
+
 ---
 
-## Running tests
+## Tests
 
 ```bash
-# Backend (no infrastructure needed)
+# Backend (no infrastructure required)
 cd backend
 make test
 
@@ -134,10 +136,10 @@ npm run test:coverage
 
 | Layer | Technology |
 |---|---|
-| API server | Go, chi router, pgx / sqlc |
-| WebSocket | Go, gorilla/websocket, RabbitMQ fanout |
-| Auth | JWT, bcrypt, OAuth2 (Google, GitHub, Discord, Twitter, Telegram) |
-| Storage | MinIO (S3-compatible, runs locally) |
-| Search | OpenSearch 2 |
+| API server | Go 1.25, chi router, pgx, sqlc |
+| WebSocket | Go, gorilla/websocket, RabbitMQ fanout exchange |
+| Auth | JWT (HS256), bcrypt, OAuth 2.0 (Google, GitHub) |
+| File storage | MinIO (S3-compatible) |
+| Full-text search | OpenSearch 2 |
 | Frontend | Vue 3, Vite, Vue Router 4, Pinia, shadcn-vue, Tailwind CSS |
 | Infrastructure | PostgreSQL 16, Redis 7, RabbitMQ 3, OpenSearch 2, MinIO |

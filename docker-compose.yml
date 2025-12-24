@@ -1,0 +1,282 @@
+# Full-stack Orbit – run everything with: docker compose up --build
+#
+# Service start order:
+#   1. postgres, redis, rabbitmq, opensearch, minio       (infrastructure)
+#   2. minio-init                                          (create bucket)
+#   3. migrate                                             (run DB migrations)
+#   4. api, ws                                             (Go services)
+#   5. frontend                                            (nginx SPA)
+#
+# Required ports on the host:
+#   3000  – frontend (browser entrypoint)
+#   8080  – API (optional direct access / health checks)
+#   8082  – WebSocket (browser connects directly for real-time)
+#   5432  – Postgres  (optional, for GUI clients)
+#   6379  – Redis     (optional)
+#   5672  – RabbitMQ AMQP
+#  15672  – RabbitMQ management UI  → http://localhost:15672  (guest/guest)
+#   9000  – MinIO S3 API
+#   9001  – MinIO console           → http://localhost:9001   (minioadmin/minioadmin)
+#   9200  – OpenSearch REST API
+
+x-backend-env: &backend-env # ---- Database ----
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USER: orbit
+  DB_PASSWORD: orbit
+  DB_NAME: orbit
+  DB_SSL_MODE: disable
+
+  # ---- Redis ----
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ""
+  REDIS_DB: "0"
+
+  # ---- RabbitMQ ----
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USERNAME: guest
+  RABBITMQ_PASSWORD: guest
+  RABBITMQ_EXCHANGE: orbit-exchange
+  RABBITMQ_SHARDING_ENABLED: "true"
+
+  # ---- JWT (change these for production!) ----
+  JWT_SECRET: dev_jwt_secret_change_in_production_min32chars
+  JWT_RESET_SECRET: dev_reset_secret_change_in_production_min32
+  JWT_EXPIRATION_HOURS: "720"
+
+  # ---- Storage (MinIO) ----
+  STORAGE_ENDPOINT: minio:9000
+  STORAGE_ACCESS_KEY: minioadmin
+  STORAGE_SECRET_KEY: minioadmin
+  STORAGE_BUCKET: orbit
+  STORAGE_USE_SSL: "false"
+  STORAGE_BASE_URL: http://localhost:9000/orbit
+
+  # ---- OpenSearch ----
+  OPENSEARCH_HOST: http://opensearch:9200
+  OPENSEARCH_USERNAME: ""
+  OPENSEARCH_PASSWORD: ""
+  SEARCH_ENABLED: "true"
+  SEARCH_INDEX_PREFIX: orbit
+  SEARCH_REINDEX_ON_STARTUP: "true"
+
+  # ---- Site / App ----
+  WEBSITE_URL: http://localhost:3000
+  SITE_NAME: Orbit
+  SITE_DESCRIPTION: A community discussion platform
+
+  # ---- Email (Resend – leave blank to skip email sending) ----
+  RESEND_API_KEY: ""
+  RESEND_FROM_EMAIL: noreply@example.com
+
+  # ---- Web Push VAPID (leave blank to disable push notifications) ----
+  WEBPUSH_PUBLIC_KEY: ""
+  WEBPUSH_PRIVATE_KEY: ""
+  WEBPUSH_SUBSCRIBER: mailto:admin@example.com
+
+  # ---- OAuth ----
+  GOOGLE_CLIENT_ID: ""
+  GOOGLE_CLIENT_SECRET: ""
+  GITHUB_CLIENT_ID: ""
+  GITHUB_CLIENT_SECRET: ""
+
+services:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Infrastructure
+  # ──────────────────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: orbit
+      POSTGRES_PASSWORD: orbit
+      POSTGRES_DB: orbit
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbit -d orbit"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  opensearch:
+    image: opensearchproject/opensearch:2
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Tr0pic@lFish99!
+      - plugins.security.disabled=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow || exit 1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mc ready local 2>/dev/null || curl -sf http://localhost:9000/minio/health/live",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # One-shot init services (run once then exit)
+  # ──────────────────────────────────────────────────────────────────────────
+
+  # Create the MinIO bucket and make it publicly readable (for avatars etc.)
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/orbit &&
+        mc anonymous set download local/orbit &&
+        echo 'MinIO bucket ready.'
+      "
+    restart: "no"
+
+  # Run database migrations using golang-migrate
+  migrate:
+    image: migrate/migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/db/migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://orbit:orbit@postgres:5432/orbit?sslmode=disable"
+      - "up"
+    restart: "no"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Application services
+  # ──────────────────────────────────────────────────────────────────────────
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["./api"]
+    environment:
+      <<: *backend-env
+      SERVER_PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/hello || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  ws:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["./ws"]
+    environment:
+      <<: *backend-env
+      WS_PORT: "8082"
+    ports:
+      - "8082:8082"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  opensearch_data:
+  minio_data:
